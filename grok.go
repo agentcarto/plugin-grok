@@ -23,7 +23,9 @@ type Options struct {
 type Factory struct{}
 
 func (Factory) Descriptor() plugin.Descriptor {
-	return plugin.Descriptor{Type: "grok", DisplayName: "Grok", ParserVersion: "4", Capabilities: domain.Capabilities{Scan: true, Conversation: true, Active: true, Resume: true, Rewind: true, Relocate: true}}
+	// ParserVersion=5: user events now carry the normalized Prompt field
+	// (agent-specific pseudo-prompt vocabulary moved out of core).
+	return plugin.Descriptor{Type: "grok", DisplayName: "Grok", ParserVersion: "5", Capabilities: domain.Capabilities{Scan: true, Conversation: true, Active: true, Resume: true, Rewind: true, Relocate: true}}
 }
 
 func (Factory) New(id string, n *yaml.Node) (any, error) {

@@ -60,6 +60,7 @@ func grokIsPreamble(text string) bool {
 // sequence, branching at each rewind_marker.
 func grokConversation(ev []domain.Event) domain.Conversation {
 	grokMarkCompaction(ev)
+	annotate(ev)
 	var nodes []domain.ConvNode
 	parentByID := map[string]string{}
 	parent := ""
@@ -79,7 +80,7 @@ func grokConversation(ev []domain.Event) domain.Conversation {
 		nodes = append(nodes, domain.ConvNode{ID: id, Parent: parent, Timestamp: e.Timestamp, Events: []domain.Event{e}})
 		parentByID[id] = parent
 		parent = id
-		if e.Kind == domain.EventUser && e.RawType != "compact_summary" && !grokIsPreamble(e.Text) {
+		if e.Kind == domain.EventUser && e.RawType != domain.RawCompactSummary && !grokIsPreamble(e.Text) {
 			turnStarts = append(turnStarts, id)
 		}
 	}

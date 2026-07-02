@@ -30,7 +30,7 @@ func summary(dir string) (title, model, parent string) {
 		parent = common.String(v["parentSessionId"])
 	}
 	// Pick the title from summary-like fields, then strip noise and tidy it.
-	title = common.CleanTitle(common.TitleCandidate(grokPickSummary(v)))
+	title = common.CleanTitle(promptText(grokPickSummary(v)))
 	return
 }
 

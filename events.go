@@ -125,6 +125,7 @@ func parse(ctx context.Context, dir string) []domain.Event {
 		if len(ev) > 0 {
 			grokBackfillTimestamps(ctx, dir, ev)
 			grokMarkCompaction(ev)
+			annotate(ev)
 			return ev
 		}
 	}
@@ -155,7 +156,7 @@ func grokIsCompactText(text string) bool {
 func grokMarkCompaction(ev []domain.Event) {
 	for i := range ev {
 		if ev[i].Kind == domain.EventUser && grokIsCompactText(ev[i].Text) {
-			ev[i].RawType = "compact_summary"
+			ev[i].RawType = domain.RawCompactSummary
 		}
 	}
 }
