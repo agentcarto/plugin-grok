@@ -3,6 +3,7 @@ package grok
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -34,13 +35,17 @@ func eventOf(o map[string]any) domain.Event {
 		k = domain.EventSystem
 	}
 	switch typ {
+	case "user":
+		k = domain.EventUser
+	case "system":
+		k = domain.EventSystem
 	case "agent_message", "assistant":
 		k = domain.EventAssistant
 	case "reasoning", "streaming_reasoning":
 		k = domain.EventReasoning
-	case "tooluse", "tool_execution", "permission_requested":
+	case "tooluse", "tool_execution", "permission_requested", "tool_started":
 		k = domain.EventToolCall
-	case "tooluse_result", "tool_completed":
+	case "tooluse_result", "tool_completed", "tool_result":
 		k = domain.EventToolResult
 	case "streaming", "streaming_text", "waiting_for_model":
 		k = domain.EventStream
@@ -58,11 +63,41 @@ func eventOf(o map[string]any) domain.Event {
 	case "turn_started", "loop_started", "first_token":
 		k = domain.EventStream
 	}
-	text := common.String(o["text"])
+	// common.Text handles both plain strings and [{"text": ...}] block lists
+	// (user content arrays and reasoning summary_text items).
+	text := common.Text(o["text"])
 	if text == "" {
-		text = common.String(o["content"])
+		text = common.Text(o["content"])
+	}
+	if text == "" {
+		text = common.Text(o["summary"])
 	}
 	return domain.Event{Kind: k, Text: text, Timestamp: common.Time(common.String(o["timestamp"])), ToolName: common.String(o["tool_name"]), RawType: typ}
+}
+
+// chatEvents expands a single chat_history record into its events: the record's
+// own event plus one tool-call event per entry of an assistant "tool_calls"
+// array (Grok keeps calls inline in the assistant record rather than as
+// separate records). Text-less assistant and reasoning events are dropped —
+// reasoning bodies are encrypted with only the summary in plaintext, and an
+// assistant record may carry tool calls with no message.
+func chatEvents(o map[string]any) []domain.Event {
+	e := eventOf(o)
+	var out []domain.Event
+	empty := strings.TrimSpace(e.Text) == ""
+	skip := empty && (e.Kind == domain.EventReasoning || e.Kind == domain.EventAssistant)
+	if !skip && (e.Kind != domain.EventMeta || e.RawType != "") {
+		out = append(out, e)
+	}
+	for _, tc := range common.Slice(o["tool_calls"]) {
+		m := common.Map(tc)
+		name := common.String(m["name"])
+		if name == "" {
+			name = "tool"
+		}
+		out = append(out, domain.Event{Kind: domain.EventToolCall, Text: common.String(m["arguments"]), Timestamp: e.Timestamp, ToolName: name, RawType: "tool_call"})
+	}
+	return out
 }
 
 // parse reads exactly one conversation-body file, trying candidates in priority
@@ -83,10 +118,7 @@ func parse(ctx context.Context, dir string) []domain.Event {
 			ev = readSQLite(path)
 		} else {
 			_ = common.JSONLines(ctx, path, func(_ int, o map[string]any) error {
-				e := eventOf(o)
-				if e.Kind != domain.EventMeta || e.RawType != "" {
-					ev = append(ev, e)
-				}
+				ev = append(ev, chatEvents(o)...)
 				return nil
 			})
 		}
@@ -295,11 +327,29 @@ func parseUpdates(ctx context.Context, dir string) []domain.Event {
 		switch su {
 		case "tool_call":
 			flush()
+			// Real records carry the tool name in "title" and the arguments in
+			// "rawInput"; "kind" is kept as the first choice for older layouts.
 			tool := common.String(u["kind"])
+			if tool == "" {
+				tool = common.String(u["title"])
+			}
 			if tool == "" {
 				tool = "tool"
 			}
-			ev = append(ev, domain.Event{Kind: domain.EventToolCall, Text: common.String(u["title"]), Timestamp: ts, ToolName: tool, RawType: "tool_call"})
+			text := common.String(u["title"])
+			if in := u["rawInput"]; in != nil {
+				args, _ := json.Marshal(in)
+				text = strings.TrimSpace(text + "\n" + string(args))
+			}
+			ev = append(ev, domain.Event{Kind: domain.EventToolCall, Text: text, Timestamp: ts, ToolName: tool, RawType: "tool_call"})
+		case "tool_call_update":
+			// A call streams many updates (e.g. Bash output_delta); exactly one per
+			// call carries a final status, so only that one becomes the result.
+			if st := common.String(u["status"]); st != "completed" && st != "failed" {
+				return nil
+			}
+			flush()
+			ev = append(ev, domain.Event{Kind: domain.EventToolResult, Text: toolUpdateResultText(u), Timestamp: ts, RawType: "tool_call_update"})
 		case "rewind_marker":
 			flush()
 			ev = append(ev, domain.Event{Kind: domain.EventMeta, Text: fmt.Sprint(u["target_prompt_index"]), Timestamp: ts, RawType: "rewind_marker"})
@@ -308,4 +358,43 @@ func parseUpdates(ctx context.Context, dir string) []domain.Event {
 	})
 	flush()
 	return ev
+}
+
+// toolUpdateResultText extracts the output of a finished tool_call_update:
+// the full output from rawOutput when present (Grok encodes it as a JSON array
+// of byte values under "output" or "stdout"), else the human-readable text
+// items of "content" (whose "diff" items carry file edits, not output text).
+func toolUpdateResultText(u map[string]any) string {
+	raw := common.Map(u["rawOutput"])
+	for _, field := range []string{"output", "stdout"} {
+		if s := decodeByteArray(raw[field]); s != "" {
+			return s
+		}
+	}
+	var lines []string
+	for _, it := range common.Slice(u["content"]) {
+		inner := common.Map(common.Map(it)["content"])
+		if s := common.String(inner["text"]); s != "" {
+			lines = append(lines, s)
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+// decodeByteArray converts a JSON array of numeric byte values into a string,
+// returning "" when v is not such an array.
+func decodeByteArray(v any) string {
+	items := common.Slice(v)
+	if len(items) == 0 {
+		return ""
+	}
+	b := make([]byte, 0, len(items))
+	for _, it := range items {
+		n, ok := it.(float64)
+		if !ok {
+			return ""
+		}
+		b = append(b, byte(n))
+	}
+	return string(b)
 }

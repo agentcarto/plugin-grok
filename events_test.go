@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/agentcarto/core/domain"
@@ -29,6 +30,13 @@ func TestEventOf(t *testing.T) {
 		{"phase_changed default -> stream", map[string]any{"type": "phase_changed", "phase": "whatever"}, domain.EventStream, ""},
 		{"text falls back to content", map[string]any{"content": "body"}, domain.EventMeta, "body"},
 		{"unknown stays meta", map[string]any{"type": "mystery"}, domain.EventMeta, ""},
+		// Real chat_history shapes: type-only records, content as string or block list,
+		// reasoning plaintext in summary_text items.
+		{"type user with block content", map[string]any{"type": "user", "content": []any{map[string]any{"type": "text", "text": "<user_query>hi</user_query>"}}}, domain.EventUser, "<user_query>hi</user_query>"},
+		{"type system", map[string]any{"type": "system", "content": "sys prompt"}, domain.EventSystem, "sys prompt"},
+		{"type tool_result", map[string]any{"type": "tool_result", "content": "out"}, domain.EventToolResult, "out"},
+		{"reasoning summary_text", map[string]any{"type": "reasoning", "summary": []any{map[string]any{"type": "summary_text", "text": "thinking"}}, "encrypted_content": "xxx"}, domain.EventReasoning, "thinking"},
+		{"tool_started", map[string]any{"type": "tool_started", "tool_name": "Glob"}, domain.EventToolCall, ""},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -41,6 +49,57 @@ func TestEventOf(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A real linear session: the user query, assistant text, inline tool_calls,
+// tool results, and reasoning summaries must all survive parsing; encrypted-only
+// reasoning and text-less assistant records must not leave empty events.
+func TestParseChatHistoryRealFormat(t *testing.T) {
+	dir := t.TempDir()
+	lines := []string{
+		`{"type":"system","content":"You are an AI coding assistant"}`,
+		`{"type":"user","content":[{"type":"text","text":"<user_query>fix the bug</user_query>"}]}`,
+		`{"type":"reasoning","summary":[{"type":"summary_text","text":"plan the fix"}],"encrypted_content":"xxx"}`,
+		`{"type":"reasoning","summary":[],"encrypted_content":"yyy"}`,
+		`{"type":"assistant","content":"looking at the code","tool_calls":[{"id":"c1","name":"Grep","arguments":"{\"pattern\":\"bug\"}"}]}`,
+		`{"type":"tool_result","tool_call_id":"c1","content":"main.go:12"}`,
+		`{"type":"assistant","content":"","tool_calls":[{"id":"c2","name":"Read","arguments":"{\"path\":\"main.go\"}"}]}`,
+		`{"type":"tool_result","tool_call_id":"c2","content":"package main"}`,
+	}
+	if err := os.WriteFile(filepath.Join(dir, "chat_history.jsonl"), []byte(joinLines(lines)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ev := parse(context.Background(), dir)
+	var got []string
+	for _, e := range ev {
+		got = append(got, string(e.Kind)+":"+e.ToolName+":"+e.Text)
+	}
+	want := []string{
+		"system::You are an AI coding assistant",
+		"user::<user_query>fix the bug</user_query>",
+		"reasoning::plan the fix",
+		"assistant::looking at the code",
+		"tool_call:Grep:{\"pattern\":\"bug\"}",
+		"tool_result::main.go:12",
+		"tool_call:Read:{\"path\":\"main.go\"}",
+		"tool_result::package main",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("events:\n%v\nwant:\n%v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("event %d = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func joinLines(lines []string) string {
+	out := ""
+	for _, l := range lines {
+		out += l + "\n"
+	}
+	return out
 }
 
 func TestGrokIsCompactText(t *testing.T) {
@@ -113,11 +172,7 @@ func TestParseUpdatesMergesChunks(t *testing.T) {
 		`{"timestamp":3,"params":{"update":{"sessionUpdate":"tool_call","kind":"bash","title":"run it"}}}`,
 		`{"timestamp":4,"params":{"update":{"sessionUpdate":"rewind_marker","target_prompt_index":2}}}`,
 	}
-	content := ""
-	for _, l := range lines {
-		content += l + "\n"
-	}
-	if err := os.WriteFile(filepath.Join(dir, "updates.jsonl"), []byte(content), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "updates.jsonl"), []byte(joinLines(lines)), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -136,5 +191,37 @@ func TestParseUpdatesMergesChunks(t *testing.T) {
 	}
 	if ev[3].Kind != domain.EventMeta || ev[3].RawType != "rewind_marker" || ev[3].Text != "2" {
 		t.Errorf("event3 = %#v, want rewind_marker meta '2'", ev[3])
+	}
+}
+
+// Real update records: tool_call carries the name in "title" and arguments in
+// "rawInput"; a call's many tool_call_update records yield exactly one result
+// (the final-status one), preferring the full rawOutput byte array over the
+// human-readable content summary.
+func TestParseUpdatesRealToolRecords(t *testing.T) {
+	dir := t.TempDir()
+	// "hi\n" as a rawOutput byte array.
+	lines := []string{
+		`{"timestamp":1,"params":{"update":{"sessionUpdate":"tool_call","toolCallId":"c1","title":"Grep","rawInput":{"pattern":"bug"}}}}`,
+		`{"timestamp":2,"params":{"update":{"sessionUpdate":"tool_call_update","toolCallId":"c1","kind":"search","title":"Grep bug"}}}`,
+		`{"timestamp":3,"params":{"update":{"sessionUpdate":"tool_call_update","toolCallId":"c1","status":"in_progress","rawOutput":{"type":"Bash","output_delta":[105,103,110,111,114,101]}}}}`,
+		`{"timestamp":4,"params":{"update":{"sessionUpdate":"tool_call_update","toolCallId":"c1","status":"completed","content":[{"type":"content","content":{"type":"text","text":"found 1 match"}}],"rawOutput":{"type":"GrepSearch","stdout":[104,105,10]}}}}`,
+		`{"timestamp":5,"params":{"update":{"sessionUpdate":"tool_call_update","toolCallId":"c2","status":"completed","content":[{"type":"content","content":{"type":"text","text":"edited"}},{"type":"diff","path":"/x.go","newText":"..."}]}}}`,
+	}
+	if err := os.WriteFile(filepath.Join(dir, "updates.jsonl"), []byte(joinLines(lines)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ev := parseUpdates(context.Background(), dir)
+	if len(ev) != 3 {
+		t.Fatalf("got %d events, want 3 (call + 2 final results): %#v", len(ev), ev)
+	}
+	if ev[0].Kind != domain.EventToolCall || ev[0].ToolName != "Grep" || !strings.Contains(ev[0].Text, `"pattern":"bug"`) {
+		t.Errorf("event0 = %#v, want Grep call with rawInput args", ev[0])
+	}
+	if ev[1].Kind != domain.EventToolResult || ev[1].Text != "hi\n" {
+		t.Errorf("event1 = %#v, want result decoded from rawOutput stdout", ev[1])
+	}
+	if ev[2].Kind != domain.EventToolResult || ev[2].Text != "edited" {
+		t.Errorf("event2 = %#v, want result from content text (diff items skipped)", ev[2])
 	}
 }
