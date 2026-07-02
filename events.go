@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -75,7 +76,7 @@ func parse(ctx context.Context, dir string) []domain.Event {
 		if e != nil {
 			continue
 		}
-		_, _ = f.Read(head)
+		_, _ = io.ReadFull(f, head) // a short read leaves head partial, which simply fails the SQLite match
 		_ = f.Close()
 		var ev []domain.Event
 		if string(head) == "SQLite format 3\x00" {
@@ -127,8 +128,9 @@ func grokMarkCompaction(ev []domain.Event) {
 	}
 }
 
-// updateMillis parses the millisecond Unix timestamp from a JSONL update record,
-// returning the zero time when it is absent.
+// updateMillis parses the second-resolution Unix timestamp (fractional seconds
+// allowed) from a JSONL update record, returning the zero time when it is
+// absent. Fork markers are written in the same unit (see appendRewindMarker).
 func updateMillis(o map[string]any) time.Time {
 	if n, ok := o["timestamp"].(float64); ok {
 		return time.UnixMilli(int64(n * 1000))

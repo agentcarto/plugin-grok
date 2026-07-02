@@ -23,7 +23,7 @@ type Options struct {
 type Factory struct{}
 
 func (Factory) Descriptor() plugin.Descriptor {
-	return plugin.Descriptor{Type: "grok", DisplayName: "Grok", ParserVersion: "2", Capabilities: domain.Capabilities{Scan: true, Conversation: true, Active: true, Resume: true, Rewind: true, Relocate: true}}
+	return plugin.Descriptor{Type: "grok", DisplayName: "Grok", ParserVersion: "3", Capabilities: domain.Capabilities{Scan: true, Conversation: true, Active: true, Resume: true, Rewind: true, Relocate: true}}
 }
 
 func (Factory) New(id string, n *yaml.Node) (any, error) {

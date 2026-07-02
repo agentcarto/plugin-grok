@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sort"
 	"testing"
+	"time"
 )
 
 func TestRewindConversation(t *testing.T) {
@@ -124,5 +125,60 @@ func TestScanGrokForkSessionIDIsDirNotCopiedInfoID(t *testing.T) {
 	}
 	if ss[0].SessionID == ss[0].ParentSessionID {
 		t.Fatalf("SessionID must not collide with the parent: %q", ss[0].SessionID)
+	}
+}
+
+// The session-dir name is written with url.PathEscape, so Scan must decode it
+// with PathUnescape: QueryUnescape turned a literal "+" in the cwd into a
+// space (regression guard for /home/u/c++proj -> "/home/u/c  proj").
+func TestScanDecodesCWDWithPlusSign(t *testing.T) {
+	root := t.TempDir()
+	cwd := "/home/u/c++proj"
+	dir := filepath.Join(root, encode(cwd), "sess")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "events.jsonl"), []byte(`{"type":"user","message":"hi"}`+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	p := &Plugin{id: "grok", o: Options{SessionsDir: root}}
+	res, err := p.Scan(context.Background(), plugin.ScanInput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Sessions) != 1 || res.Sessions[0].CWD != cwd {
+		t.Fatalf("CWD did not survive the encode/decode round trip: %#v", res.Sessions)
+	}
+}
+
+// StartedAt comes from the first timestamped event, not from the directory
+// mtime (which is the *update* time and made every grok session look like it
+// started when it was last touched).
+func TestScanStartedAtUsesFirstEventTimestamp(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "repo", "sess")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	lines := `{"role":"user","content":"hi","timestamp":"2026-01-02T03:04:05Z"}` + "\n" +
+		`{"role":"assistant","content":"yo","timestamp":"2026-01-02T03:05:00Z"}` + "\n"
+	if err := os.WriteFile(filepath.Join(dir, "chat_history.jsonl"), []byte(lines), 0600); err != nil {
+		t.Fatal(err)
+	}
+	p := &Plugin{id: "grok", o: Options{SessionsDir: root}}
+	res, err := p.Scan(context.Background(), plugin.ScanInput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Sessions) != 1 {
+		t.Fatalf("sessions=%#v", res.Sessions)
+	}
+	s := res.Sessions[0]
+	want := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	if !s.StartedAt.Equal(want) {
+		t.Fatalf("StartedAt=%v want %v", s.StartedAt, want)
+	}
+	if s.StartedAt.Equal(s.UpdatedAt) {
+		t.Fatal("StartedAt must not just mirror UpdatedAt")
 	}
 }

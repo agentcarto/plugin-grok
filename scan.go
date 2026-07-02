@@ -86,7 +86,16 @@ func (p *Plugin) sessionFromDir(ctx context.Context, dir, cwd string, ev []domai
 	// The basename avoids that.
 	id := filepath.Base(dir)
 	updated := common.MaxMTime(dir)
-	return domain.Session{PluginID: p.id, AgentType: "grok", SessionID: id, CWD: cwd, StartedAt: updated, UpdatedAt: updated, Title: title, Model: model, ParentSessionID: parent, SourceRef: domain.SessionRef{Source: dir}, LastKind: grokTailKind(ctx, dir)}
+	// The first timestamped event marks the session start; fall back to the
+	// update time only when no event carries a timestamp.
+	started := updated
+	for _, e := range ev {
+		if !e.Timestamp.IsZero() {
+			started = e.Timestamp
+			break
+		}
+	}
+	return domain.Session{PluginID: p.id, AgentType: "grok", SessionID: id, CWD: cwd, StartedAt: started, UpdatedAt: updated, Title: title, Model: model, ParentSessionID: parent, SourceRef: domain.SessionRef{Source: dir}, LastKind: grokTailKind(ctx, dir)}
 }
 
 func (p *Plugin) Scan(ctx context.Context, in plugin.ScanInput) (plugin.ScanOutput, error) {
@@ -103,7 +112,10 @@ func (p *Plugin) Scan(ctx context.Context, in plugin.ScanInput) (plugin.ScanOutp
 		if !d.IsDir() {
 			continue
 		}
-		cwd, _ := url.QueryUnescape(d.Name())
+		// PathUnescape, not QueryUnescape: directory names are written with
+		// url.PathEscape (see encode in fork.go), and QueryUnescape would turn a
+		// literal "+" in the cwd into a space.
+		cwd, _ := url.PathUnescape(d.Name())
 		root := filepath.Join(p.o.SessionsDir, d.Name())
 		for _, dir := range sessionDirs(root) {
 			if s, ok := cache.Reuse(dir); ok {
