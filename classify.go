@@ -1,6 +1,7 @@
 package grok
 
 import (
+	"encoding/json"
 	"strings"
 
 	"github.com/agentcarto/core/domain"
@@ -27,13 +28,31 @@ func promptText(text string) string {
 	return strings.Join(strings.Fields(t), " ")
 }
 
-// annotate fills the normalized Prompt field on user events, in place. It runs
-// after grokMarkCompaction so compaction summaries never carry a prompt.
+// annotate fills the normalized Prompt field on user events and ToolArg on
+// tool calls, in place. It runs after grokMarkCompaction so compaction
+// summaries never carry a prompt.
 func annotate(ev []domain.Event) {
 	for i := range ev {
-		if ev[i].Kind != domain.EventUser || ev[i].RawType == domain.RawCompactSummary {
-			continue
+		switch {
+		case ev[i].Kind == domain.EventToolCall:
+			ev[i].ToolArg = toolArg(ev[i].Text)
+		case ev[i].Kind == domain.EventUser && ev[i].RawType != domain.RawCompactSummary:
+			ev[i].Prompt = promptText(ev[i].Text)
 		}
-		ev[i].Prompt = promptText(ev[i].Text)
 	}
+}
+
+// toolArg extracts the one-line display argument for a tool call from its JSON
+// arguments payload, or "" when the payload has no salient string field.
+func toolArg(text string) string {
+	var m map[string]any
+	if json.Unmarshal([]byte(text), &m) != nil {
+		return ""
+	}
+	for _, k := range []string{"description", "file_path", "notebook_path", "path", "command", "pattern", "query", "url", "prompt"} {
+		if v, _ := m[k].(string); strings.TrimSpace(v) != "" {
+			return strings.TrimSpace(v)
+		}
+	}
+	return ""
 }
