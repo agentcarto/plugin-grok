@@ -1,9 +1,9 @@
 package grok
 
 import (
-	"encoding/json"
 	"strings"
 
+	"github.com/agentcarto/core/common"
 	"github.com/agentcarto/core/domain"
 )
 
@@ -22,7 +22,7 @@ func promptText(text string) string {
 	if t == "" || grokIsPreamble(t) || strings.HasPrefix(t, "<rules") {
 		return ""
 	}
-	if strings.HasPrefix(t, "/") && !strings.Contains(t, "\n") && len([]rune(t)) <= 40 {
+	if common.IsBareSlashCommand(t) {
 		return ""
 	}
 	return strings.Join(strings.Fields(t), " ")
@@ -35,24 +35,9 @@ func annotate(ev []domain.Event) {
 	for i := range ev {
 		switch {
 		case ev[i].Kind == domain.EventToolCall:
-			ev[i].ToolArg = toolArg(ev[i].Text)
+			ev[i].ToolArg = common.ToolArgFromJSON(ev[i].Text)
 		case ev[i].Kind == domain.EventUser && ev[i].RawType != domain.RawCompactSummary:
 			ev[i].Prompt = promptText(ev[i].Text)
 		}
 	}
-}
-
-// toolArg extracts the one-line display argument for a tool call from its JSON
-// arguments payload, or "" when the payload has no salient string field.
-func toolArg(text string) string {
-	var m map[string]any
-	if json.Unmarshal([]byte(text), &m) != nil {
-		return ""
-	}
-	for _, k := range []string{"description", "file_path", "notebook_path", "path", "command", "pattern", "query", "url", "prompt"} {
-		if v, _ := m[k].(string); strings.TrimSpace(v) != "" {
-			return strings.TrimSpace(v)
-		}
-	}
-	return ""
 }
