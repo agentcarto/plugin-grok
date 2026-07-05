@@ -13,15 +13,31 @@ import (
 )
 
 func (p *Plugin) LoadConversation(ctx context.Context, r domain.SessionRef) (*domain.Conversation, error) {
+	// Grok records a single model per session (summary.json current_model_id),
+	// with no per-turn attribution in the chat log, so every turn shows that one
+	// model.
+	_, model, _ := summary(r.Source)
 	// Only sessions that used revert build a branch tree from updates; everything
 	// else is a linear conversation read from chat_history.
 	if grokReverted(r.Source) {
-		if c := grokConversation(parseUpdates(ctx, r.Source)); len(c.Nodes) > 0 {
+		if c := grokConversation(grokStampModel(parseUpdates(ctx, r.Source), model)); len(c.Nodes) > 0 {
 			return &c, nil
 		}
 	}
-	c := common.Linear(parse(ctx, r.Source))
+	c := common.Linear(grokStampModel(parse(ctx, r.Source), model))
 	return &c, nil
+}
+
+// grokStampModel stamps the session's single model onto every event so each
+// turn row can display it.
+func grokStampModel(ev []domain.Event, model string) []domain.Event {
+	if model == "" {
+		return ev
+	}
+	for i := range ev {
+		ev[i].Model = model
+	}
+	return ev
 }
 
 // grokReverted reports whether the session used rewind or edit-and-retry,

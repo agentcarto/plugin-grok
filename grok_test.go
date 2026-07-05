@@ -27,6 +27,37 @@ func TestRewindConversation(t *testing.T) {
 	}
 }
 
+// Grok has one model per session (summary.json current_model_id) and no
+// per-turn attribution, so LoadConversation stamps that model onto every event.
+func TestLoadConversationStampsModel(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "summary.json"), []byte(`{"current_model_id":"grok-4"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	chat := `{"role":"user","text":"hello","timestamp":"2026-01-01T00:00:00Z"}
+{"role":"assistant","text":"hi there","timestamp":"2026-01-01T00:00:01Z"}
+`
+	if err := os.WriteFile(filepath.Join(dir, "chat_history.jsonl"), []byte(chat), 0600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := (&Plugin{}).LoadConversation(context.Background(), domain.SessionRef{Source: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	for _, node := range c.Nodes {
+		for _, e := range node.Events {
+			n++
+			if e.Model != "grok-4" {
+				t.Fatalf("event %q model=%q, want grok-4", e.Text, e.Model)
+			}
+		}
+	}
+	if n == 0 {
+		t.Fatal("no events stamped")
+	}
+}
+
 func TestRewindConversationKeepsDeadBranch(t *testing.T) {
 	ev := []domain.Event{
 		{Kind: domain.EventUser, Text: "test1"},
